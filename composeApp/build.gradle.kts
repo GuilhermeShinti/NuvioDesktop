@@ -1404,6 +1404,42 @@ fun publishMacosDmgArtifact(dmg: File) {
     logger.lifecycle("Published macOS DMG artifact: ${publishedDmg.absolutePath}")
 }
 
+fun patchWindowsMsiLauncherPath(msi: File) {
+    if (!isWindowsHost) return
+
+    // The jpackage launcher restarts itself once to put <install>\app on PATH.
+    // Its hidden message window can fail with ERROR_INVALID_WINDOW_HANDLE (1400)
+    // on some Windows setups. Making the installer add <install>\app to PATH
+    // skips that restart/message-loop path entirely.
+    // See docs/windows-launcher-startup.md and issue #829.
+    val patchScript = rootProject.layout.projectDirectory
+        .file("scripts/windows/patch-msi-launcher-path.ps1")
+        .asFile
+    check(patchScript.isFile) {
+        "Missing Windows MSI launcher PATH patch script: ${patchScript.absolutePath}"
+    }
+
+    val command = listOf(
+        "powershell",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        patchScript.absolutePath,
+        "-MsiPath",
+        msi.absolutePath,
+    )
+    val process = ProcessBuilder(command).redirectErrorStream(true).start()
+    val output = process.inputStream.bufferedReader().use { it.readText() }
+    val exitCode = process.waitFor()
+    if (output.isNotBlank()) {
+        logger.lifecycle(output.trimEnd())
+    }
+    check(exitCode == 0) {
+        "Windows MSI launcher PATH patch failed with exit code $exitCode: ${command.joinToString(" ")}"
+    }
+}
+
 fun publishWindowsMsiOutput(release: Boolean) {
     if (!isWindowsHost) return
 
@@ -1415,6 +1451,7 @@ fun publishWindowsMsiOutput(release: Boolean) {
         ?: finalMsi.takeIf { it.exists() }
         ?: error("Expected Windows MSI output in ${outputDir.absolutePath}")
 
+    patchWindowsMsiLauncherPath(sourceMsi)
     if (sourceMsi.canonicalFile != finalMsi.canonicalFile) {
         sourceMsi.copyTo(finalMsi, overwrite = true)
     }
